@@ -1,0 +1,451 @@
+{
+  "name": "AutoMate Multi-Agent LLM Workflow copy",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Get full PDF text\nconst fullText = $input.first().json.text;\n\n// M&A keywords for scoring\nconst maKeywords = [\n  'merger', 'acquisition', 'target', 'acquirer', 'deal', 'transaction',\n  'buyout', 'synergies', 'consolidation', 'integration', 'due diligence'\n];\n\n// Split into paragraphs\nconst paragraphs = fullText.split('\\n\\n').filter(p => p.trim().length > 50);\n\n// Score chunks\nconst chunks = paragraphs.map((text, index) => {\n  const lowerText = text.toLowerCase();\n  let score = 0;\n\n  maKeywords.forEach(keyword => {\n    score += (lowerText.match(new RegExp(keyword, 'gi')) || []).length * 3;\n  });\n\n  return {\n    text: text.trim(),\n    relevance_score: score,\n    char_count: text.length\n  };\n});\n\n// Filter + sort + limit\nconst filteredChunks = chunks\n  .filter(c => c.relevance_score > 0 || c.char_count < 1000)\n  .sort((a, b) => b.relevance_score - a.relevance_score)\n  .slice(0, 8);\n\n// COMBINE into one string\nconst combinedText = filteredChunks\n  .map(c => c.text)\n  .join('\\n\\n');\n\n// RETURN SINGLE ITEM ONLY\nreturn [\n  {\n    json: {\n      text: combinedText\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        400
+      ],
+      "id": "6129d764-fa15-41a1-a900-3045f00bd056",
+      "name": "Chunk & Score M&A",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===============================\n// Extract Companies & Roles (JS)\n// ===============================\n\n// Get input safely\nconst inputData = $input.first().json || {};\nconst text =\n  inputData.filtered_text ||\n  inputData.text ||\n  inputData.original_text ||\n  '';\n\n// Exit early if no text\nif (!text || text.length < 20) {\n  return [{\n    json: {\n      pdf_filename: 'unknown.pdf',\n      total_companies: 0,\n      companies: [],\n      summary: 'No text available for extraction',\n      text_preview: ''\n    }\n  }];\n}\n\n// -------- COMPANY NAME REGEX --------\n// Matches capitalized company-like phrases\nconst companyPattern =\n  /\\b([A-Z][a-zA-Z]+(?:\\s[A-Z][a-zA-Z]+)*(?:\\sInc|\\sCorp|\\sCorporation|\\sSolutions|\\sLtd|\\sLLC)?)\\b/g;\n\nconst matches = text.match(companyPattern) || [];\n\n// Remove duplicates + short junk words\nconst uniqueCompanies = [...new Set(matches)]\n  .filter(name => name.length > 3 && !/^(The|This|That|And|For|With)$/.test(name))\n  .slice(0, 6);\n\n// -------- ROLE DETECTION --------\nfunction detectRole(name, fullText) {\n  const lower = fullText.toLowerCase();\n  const nameLower = name.toLowerCase();\n\n  if (lower.includes(`acquired ${nameLower}`) || lower.includes(`${nameLower} was acquired`)) {\n    return 'Target';\n  }\n  if (lower.includes(`${nameLower} acquired`) || lower.includes(`${nameLower} buys`)) {\n    return 'Acquirer';\n  }\n  if (lower.includes(`${nameLower} merger`) || lower.includes(`merger with ${nameLower}`)) {\n    return 'Merger Partner';\n  }\n  return 'Unknown';\n}\n\n// -------- BUILD COMPANY OBJECTS --------\nconst companies = uniqueCompanies.map(name => {\n  const role = detectRole(name, text);\n\n  // Small context snippet\n  const index = text.toLowerCase().indexOf(name.toLowerCase());\n  const context =\n    index !== -1\n      ? text.substring(Math.max(0, index - 40), index + 80)\n      : text.substring(0, 120);\n\n  return {\n    name,\n    role,\n    context: context.trim()\n  };\n});\n\n// -------- RETURN STRUCTURED OUTPUT --------\nreturn [{\n  json: {\n    pdf_filename: inputData.pdf_filename || 'document.pdf',\n    total_companies: companies.length,\n    companies: companies,\n    summary:\n      companies.length > 0\n        ? `${companies.length} companies extracted`\n        : 'No companies detected',\n    text_preview: text.substring(0, 200)\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        400
+      ],
+      "id": "5a853e7b-7e76-4340-bb59-c5a2f8717b64",
+      "name": "Extract Companies & Roles"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===============================\n// Industry Classification (JS)\n// ===============================\n\nconst inputData = $input.first().json || {};\nconst companies = inputData.companies || [];\n\n// Exit early if no companies\nif (!companies || companies.length === 0) {\n  return [{\n    json: {\n      total_companies: 0,\n      classified_companies: [],\n      industry_breakdown: {\n        tech_count: 0,\n        total_count: 0\n      },\n      summary: 'No companies to classify'\n    }\n  }];\n}\n\n// -------- INDUSTRY RULE TAXONOMY --------\nconst industryRules = {\n  saas: ['saas', 'software', 'platform', 'cloud', 'subscription'],\n  fintech: ['fintech', 'payment', 'banking', 'financial', 'wallet'],\n  cybersecurity: ['cybersecurity', 'security', 'encryption', 'firewall'],\n  ai_ml: ['ai', 'machine learning', 'ml', 'artificial intelligence', 'neural'],\n  healthcare: ['health', 'medical', 'pharma', 'biotech'],\n  logistics: ['logistics', 'supply chain', 'shipping', 'transport'],\n  retail: ['retail', 'commerce', 'ecommerce', 'marketplace'],\n  energy: ['energy', 'oil', 'gas', 'solar', 'renewable']\n};\n\n// -------- CLASSIFICATION LOGIC --------\nconst classifiedCompanies = companies.map(company => {\n  const contextText =\n    (company.context || '') + ' ' + (company.name || '');\n\n  const contextLower = contextText.toLowerCase();\n\n  let industries = [];\n  let subIndustries = [];\n  let confidence = 0.6;\n\n  Object.entries(industryRules).forEach(([industry, keywords]) => {\n    const matches = keywords.filter(keyword =>\n      contextLower.includes(keyword)\n    );\n\n    if (matches.length > 0) {\n      industries.push(industry);\n      subIndustries.push(matches[0]);\n      confidence += 0.15 * matches.length;\n    }\n  });\n\n  if (industries.length === 0) {\n    industries = ['unknown'];\n    subIndustries = ['general'];\n    confidence = 0.5;\n  }\n\n  confidence = Math.min(0.99, confidence);\n\n  return {\n    ...company,\n    industries,\n    sub_industries: subIndustries,\n    classification_confidence: confidence\n  };\n});\n\n// -------- BREAKDOWN METRICS --------\nconst techIndustries = ['saas', 'ai_ml', 'cybersecurity'];\n\nconst techCount = classifiedCompanies.filter(company =>\n  company.industries.some(ind => techIndustries.includes(ind))\n).length;\n\n// -------- RETURN STRUCTURED OUTPUT --------\nreturn [{\n  json: {\n    total_companies: classifiedCompanies.length,\n    classified_companies: classifiedCompanies,\n    industry_breakdown: {\n      tech_count: techCount,\n      total_count: classifiedCompanies.length\n    },\n    summary: `${techCount}/${classifiedCompanies.length} companies fall under tech-related industries`\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        400
+      ],
+      "id": "814d472b-04bf-421e-94b7-a7143fba90fe",
+      "name": "Industry Classification"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===============================\n// IT / Technology Flags (JS)\n// ===============================\n\nconst inputData = $input.first().json || {};\nconst companies = inputData.classified_companies || [];\n\n// Exit early if no companies\nif (!companies || companies.length === 0) {\n  return [{\n    json: {\n      total_companies: 0,\n      tech_relevant_count: 0,\n      tech_companies: [],\n      all_companies: [],\n      summary: 'No companies available for tech scoring'\n    }\n  }];\n}\n\n// -------- TECH INDICATOR WEIGHTS --------\nconst techIndicators = {\n  high: ['saas', 'ai_ml', 'cybersecurity', 'cloud', 'machine learning', 'artificial intelligence'],\n  medium: ['fintech', 'software', 'platform', 'logistics', 'data', 'analytics'],\n  low: ['retail', 'energy', 'manufacturing']\n};\n\n// -------- SCORING LOGIC --------\nconst scoredCompanies = companies.map(company => {\n  const combinedText =\n    (company.context || '') +\n    ' ' +\n    (company.name || '') +\n    ' ' +\n    (company.industries || []).join(' ');\n\n  const lowerText = combinedText.toLowerCase();\n\n  let techScore = 0;\n  let evidence = [];\n\n  Object.entries(techIndicators).forEach(([level, keywords]) => {\n    keywords.forEach(keyword => {\n      if (lowerText.includes(keyword)) {\n        const points = level === 'high' ? 3 : level === 'medium' ? 2 : 1;\n        techScore += points;\n        evidence.push(`${keyword} detected`);\n      }\n    });\n  });\n\n  const isTechRelevant = techScore >= 4;\n  const relevanceLevel =\n    techScore >= 8 ? 'High' :\n    techScore >= 4 ? 'Medium' :\n    'Low';\n\n  return {\n    ...company,\n    tech_score: techScore,\n    is_tech_relevant: isTechRelevant,\n    relevance_level: relevanceLevel,\n    tech_justification:\n      evidence.length > 0\n        ? evidence.slice(0, 3).join(', ')\n        : 'No strong tech indicators',\n    tech_signals: evidence\n  };\n});\n\n// -------- SUMMARY METRICS --------\nconst techRelevantCompanies = scoredCompanies.filter(c => c.is_tech_relevant);\n\n// -------- RETURN STRUCTURED OUTPUT --------\nreturn [{\n  json: {\n    total_companies: scoredCompanies.length,\n    tech_relevant_count: techRelevantCompanies.length,\n    tech_companies: techRelevantCompanies,\n    all_companies: scoredCompanies,\n    summary: `${techRelevantCompanies.length}/${scoredCompanies.length} companies are IT/technology relevant`\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        400
+      ],
+      "id": "ed6d43ba-dae6-4ca8-a353-b7d166135dea",
+      "name": "IT Tech Flags"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -432,
+        400
+      ],
+      "id": "d28d19de-7549-4e9d-9b98-b1bf901b0762",
+      "name": "Extract text from File"
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "1pav_J-ZcSbfwyxgKdx7KS4wOsXJrbDhi",
+          "mode": "list",
+          "cachedResultName": "demo3.pdf",
+          "cachedResultUrl": "https://drive.google.com/file/d/1pav_J-ZcSbfwyxgKdx7KS4wOsXJrbDhi/view?usp=drivesdk"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -576,
+        400
+      ],
+      "id": "f0624c96-802c-4fc6-9ce8-7e289a3ca307",
+      "name": "Download file"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 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"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "=JSON",
+        "body": "{   \"model\": \"llama-3.1-8b-instant\",   \"temperature\": 0.1,   \"max_tokens\": 200,   \"messages\": [     {       \"role\": \"system\",       \"content\": \"You are an expert mergers and acquisitions document classifier. Return ONLY raw JSON. No markdown.\"     },     {       \"role\": \"user\",       \"content\": \"Determine if the following text relates to mergers, acquisitions, strategic mergers, due diligence, or corporate deals. Return JSON exactly: {\\\"is_ma\\\":true/false,\\\"confidence\\\":0.0-1.0,\\\"indicators\\\":[],\\\"relevant_text\\\":\\\"exact sentence\\\"}\"     },     {       \"role\": \"user\",       \"content\": \"{{$node[\\\"Chunk & Score M&A\\\"].json.text}}\"     }   ] }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -128,
+        624
+      ],
+      "id": "e62167ec-d514-420a-a25b-b81637f405e3",
+      "name": "LLM – M&A Detector"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===============================\n// Parse M&A JSON (WITH TRUE FAILSAFE)\n// ===============================\n\nconst raw = $input.first().json.choices?.[0]?.message?.content || '';\n\nlet cleaned = raw\n  .replace(/```json/g, '')\n  .replace(/```/g, '')\n  .trim();\n\nlet parsed;\n\ntry {\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parsed = {};\n}\n\n// -------- NORMALIZE BOOLEAN --------\nlet isMaValue = parsed.is_ma;\n\nif (typeof isMaValue === 'string') {\n  isMaValue = isMaValue.toLowerCase() === 'true';\n}\n\nif (typeof isMaValue !== 'boolean') {\n  isMaValue = false;\n}\n\n// -------- FAILSAFE TRUE LOGIC --------\n// If confidence high OR indicators present → force TRUE\nconst confidence = Number(parsed.confidence) || 0;\nconst indicators = Array.isArray(parsed.indicators) ? parsed.indicators : [];\n\nif (!isMaValue && (confidence >= 0.6 || indicators.length >= 2)) {\n  isMaValue = true;\n}\n\n// -------- RETURN CLEAN STRUCTURE --------\nreturn [\n  {\n    json: {\n      is_ma: isMaValue,\n      confidence: confidence,\n      indicators: indicators,\n      relevant_text: parsed.relevant_text || ''\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        800
+      ],
+      "id": "447ab9b2-38c4-4826-82dd-097de1e105a8",
+      "name": "Parse JSON"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===============================\n// Parse Justification JSON (JS)\n// ===============================\n\nconst raw = $input.first().json.choices?.[0]?.message?.content || '';\n\n// Remove markdown fences if any\nlet cleaned = raw\n  .replace(/```json/g, '')\n  .replace(/```/g, '')\n  .trim();\n\nlet parsed;\n\ntry {\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parsed = { justifications: [] };\n}\n\n// Normalize structure\nif (Array.isArray(parsed)) {\n  parsed = { justifications: parsed };\n}\n\nif (!parsed.justifications) {\n  parsed.justifications = [];\n}\n\nreturn [\n  {\n    json: {\n      justifications: parsed.justifications\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        688
+      ],
+      "id": "e570c077-8d56-4747-8a89-8e16869383ca",
+      "name": "Parse Justification JSON"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===============================\n// Final M&A Report (MULTI INPUT)\n// ===============================\n\nconst inputs = $input.all();\n\nlet maData = {};\nlet techData = {};\nlet justData = {};\n\ninputs.forEach(item => {\n  const data = item.json;\n\n  if (data.is_ma !== undefined) maData = data;\n  if (data.all_companies) techData = data;\n  if (data.justifications) justData = data;\n});\n\nconst companies = techData.all_companies || [];\nconst justifications = justData.justifications || [];\nconst techRelevant = companies.filter(c => c.is_tech_relevant);\n\nreturn [\n  {\n    json: {\n      report_generated_at: new Date().toISOString(),\n      is_ma: maData.is_ma ?? false,\n      confidence: maData.confidence ?? 0,\n      indicators: maData.indicators ?? [],\n      relevant_text: maData.relevant_text ?? \"\",\n      total_companies: companies.length,\n      tech_relevant_count: techRelevant.length,\n      tech_percentage:\n        companies.length > 0\n          ? ((techRelevant.length / companies.length) * 100).toFixed(1) + \"%\"\n          : \"0%\",\n      companies: companies,\n      justifications: justifications,\n      summary:\n        companies.length > 0\n          ? `${techRelevant.length}/${companies.length} companies are IT/tech relevant`\n          : \"M&A document detected but no companies extracted\"\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        768
+      ],
+      "id": "67e64389-db33-4721-9cf9-bda7b2fc4dbf",
+      "name": "Final M&A Report"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===============================\n// Final Non-M&A Report (SAFE)\n// ===============================\n\n// Only read the data coming from IF input\nconst input = $input.first().json || {};\n\nreturn [\n  {\n    json: {\n      report_generated_at: new Date().toISOString(),\n      is_ma: false,\n      confidence: input.confidence || 0,\n      indicators: input.indicators || [],\n      relevant_text: input.relevant_text || \"\",\n      total_companies: 0,\n      tech_relevant_count: 0,\n      tech_percentage: \"0%\",\n      companies: [],\n      summary: \"Document is not classified as an M&A related document.\"\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        592
+      ],
+      "id": "f10e5e12-8c11-4c76-b88d-3378fda51e1d",
+      "name": "Final Non-M&A Report"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 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"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "=JSON",
+        "body": "{   \"model\": \"llama-3.1-8b-instant\",   \"temperature\": 0.2,   \"max_tokens\": 250,   \"messages\": [     {       \"role\": \"system\",       \"content\": \"You generate short professional justifications for company tech relevance. Return ONLY raw JSON. No markdown. No explanations outside JSON.\"     },     {       \"role\": \"user\",       \"content\": \"For each company, explain in 1–2 sentences why it is or is not IT/technology relevant. Use the given industries and tech score only. Output format exactly: {\\\"justifications\\\":[{\\\"name\\\":\\\"\\\",\\\"justification\\\":\\\"\\\"}]}\"     },     {       \"role\": \"user\",       \"content\": \"{{$node[\\\"IT Tech Flags\\\"].json.all_companies}}\"     }   ] }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        752,
+        656
+      ],
+      "id": "1a3f8b51-fad0-463b-922c-66d7a2ba31d2",
+      "name": "LLM –Justification Generator"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "numberInputs": 3,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1360,
+        752
+      ],
+      "id": "079b82fe-ac9f-4c06-8a6a-5bcc7e5fd41e",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "50037b4d-021f-410f-ac0b-d4f714733361",
+              "leftValue": "={{   $json[\"is_ma\"] === true ||   $json[\"confidence\"] >= 0.6 ||   ($json[\"indicators\"] && $json[\"indicators\"].length >= 2) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        176,
+        576
+      ],
+      "id": "49a78605-3897-4193-a194-6705d616b5f7",
+      "name": "If_ma"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -736,
+        400
+      ],
+      "id": "46b870c7-7b52-4c2d-b1f3-4297ea9f9f28",
+      "name": "Start"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Chunk & Score M&A": {
+      "main": [
+        [
+          {
+            "node": "LLM – M&A Detector",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Extract Companies & Roles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Companies & Roles": {
+      "main": [
+        [
+          {
+            "node": "Industry Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Industry Classification": {
+      "main": [
+        [
+          {
+            "node": "IT Tech Flags",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IT Tech Flags": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "LLM –Justification Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract text from File": {
+      "main": [
+        [
+          {
+            "node": "Chunk & Score M&A",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download file": {
+      "main": [
+        [
+          {
+            "node": "Extract text from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM – M&A Detector": {
+      "main": [
+        [
+          {
+            "node": "Parse JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse JSON": {
+      "main": [
+        [
+          {
+            "node": "If_ma",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Parse Justification JSON": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "LLM –Justification Generator": {
+      "main": [
+        [
+          {
+            "node": "Parse Justification JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Final M&A Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If_ma": {
+      "main": [
+        [
+          {
+            "node": "Extract Companies & Roles",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Final Non-M&A Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Download file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "37c99af6-c63a-40ad-8615-f51918167f3d",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f3788566d130d80b72bed3d32ad652733dbceba6d181546279279f5445ca37c8"
+  },
+  "id": "0uamDSqxydOmbEoU",
+  "tags": []
+}
