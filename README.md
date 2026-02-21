@@ -1,4 +1,4 @@
-# AI-workflow-of-M-A-documents-classification-in-N8N
+# AI-workflow-of-M&A-documents-classification-in-N8N
 *AutoMate Multi-Agent LLM Workflow*
 
 An AI-powered document intelligence system built in n8n that automatically detects M&A activity, extracts companies, classifies industries, and flags IT/technology relevance with justification.
